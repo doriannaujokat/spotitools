@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LibSearch for Spotify</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#1DB954">
+    <link rel="stylesheet" href="/main.css">
+    <script src="/auth.mjs" type="module"></script>
+    <script src="/app.js"></script>
+    <script>
+        window.addEventListener('dragover', (e) => {
+            e.preventDefault();
+        });
+        window.addEventListener('drop', (e) => {
+            e.preventDefault();
+            console.log([...e.dataTransfer.types], [...e.dataTransfer.types].map(v => e.dataTransfer.getData(v)));
+        });
+        (async () => {
+            const { Spotify } = await import('/spotify.js');
+            const loadLib = async () => {
+                const DomBuilder = await import('/domBuilder.mjs');
+                const contentDom = document.getElementById('content');
+                const spotify = Spotify.global;
+
+                /** @type {{id: string}} */
+                const owner = await spotify.ApiFetch('/me');
+                /** @type {Map<string, Object>} */
+                const playlists = new Map();
+                /** @type {Set<string>} */
+                const playlistsOwned = new Set();
+                /** @type {Map<string, Object>} */
+                const songs = new Map();
+                /** @type {Map<string, Set<string>>} */
+                const playlistSongs = new Map();
+
+                const filterResults = new Set();
+
+                let oldData;
+
+                const fetchLibrary = async () => {
+                    const fetchDom = document.createElement('div');
+                    fetchDom.classList.add('center', 'vwrap');
+                    contentDom.replaceChildren(fetchDom);
+
+                    const pt = document.createElement('div');
+                    const ppd = document.createElement('div');
+                    const pb = new DomBuilder.ProgressBar();
+                    fetchDom.append(pt,ppd,pb.build());
+                    pt.innerText = '';
+                    ppd.innerText = 'Preparing';
+
+                    const nSteps = 3;
+
+
+                    pt.innerText = `Step 1 / ${nSteps}`;
+                    ppd.innerText = 'Fetching playlists';
+
+                    await spotify.ApiFetchAll('/me/playlists', (resp) => {
+                        for (let playlist of resp.items) {
+                            playlists.set(playlist.id, playlist);
+                            if (oldData && playlist.id in oldData.playlists && playlist.id in oldData.playlistTracks && playlist.snapshot_id === oldData.playlists[playlist.id]) {
+                                if (!playlistSongs.has(playlist.id)) playlistSongs.set(playlist.id, new Set());
+                                const cplsongs = playlistSongs.get(playlist.id);
+                                for (let track of oldData.playlistTracks[playlist.id]) {
+                                    if (!track) continue;
+                                    if (!track in oldData.tracks) continue;
+                                    if (!songs.has(track)) songs.set(track,oldData.tracks[track]);
+                                    cplsongs.add(track);
+                                }
+                            }
+                            if (playlist.owner.id === owner.id) playlistsOwned.add(playlist.id);
+                        }
+                        pb.setMax(resp.total).setValue(resp.offset + resp.items.length);
+                    }, {limit: 50});
+
+                    pt.innerText = `Step 2 / ${nSteps}`;
+                    ppd.innerText = 'Fetching songs';
+                    const sfpb = new DomBuilder.ProgressBar();
+                    fetchDom.append(sfpb.build());
+                    pb.setMax(playlists.size + 1).setValue(0);
+                    for (let [id, playlist] of playlists) {
+                        sfpb.setValue(0);
+                        if (playlistSongs.has(id)) {
+                            pb.setValue(pb.value+1);
+                            continue;
+                        }
+                        await spotify.ApiFetchAll(`/playlists/${id}/tracks`, (resp) => {
+                            if (!playlistSongs.has(id)) playlistSongs.set(id, new Set());
+                            const cplsongs = playlistSongs.get(id);
+                            for (let song of resp.items) {
+                                if (!song.track || !song.track.id || song.track.is_local) continue;
+                                if (!songs.has(song.track.id)) songs.set(song.track.id,song.track);
+                                cplsongs.add(song.track.id);
+                            }
+                            sfpb.setMax(resp.total).setValue(resp.offset + resp.items.length);
+                        }, {limit: 50, delay: 100});
+                        pb.setValue(pb.value+1);
+                    }
+                    sfpb.setValue(0);
+                    await spotify.ApiFetchAll(`/me/tracks`, (resp) => {
+                        if (!playlistSongs.has('saved')) playlistSongs.set('saved', new Set());
+                        const cplsongs = playlistSongs.get('saved');
+                        for (let song of resp.items) {
+                            if (!song.track) continue;
+                            if (!songs.has(song.track.id)) songs.set(song.track.id,song.track);
+                            cplsongs.add(song.track.id);
+                        }
+                        sfpb.setMax(resp.total).setValue(resp.offset + resp.items.length);
+                    }, {limit: 50, delay: 100});
+                    pb.setValue(pb.value+1);
+
+                    const exportButton = document.createElement('button');
+                    exportButton.classList.add('export');
+                    exportButton.title = 'Export library data';
+                    exportButton.append(DomBuilder.SVGIcon("M5 3C3.895 3 3 3.895 3 5L3 25C3 26.105 3.895 27 5 27L19 27C20.105 27 21 26.105 21 25L21 16L14 16C13.448 16 13 15.552 13 15C13 14.448 13.448 14 14 14L21 14L21 9.5C21 9.235 20.895031 8.9799688 20.707031 8.7929688L15.207031 3.2929688C15.019031 3.1049688 14.765 3 14.5 3L5 3 z M 21 14L21 16L26.585938 16L24.292969 18.292969 A 1.0001 1.0001 0 1 0 25.707031 19.707031L29.707031 15.707031 A 1.0001 1.0001 0 0 0 29.707031 14.292969L25.707031 10.292969 A 1.0001 1.0001 0 0 0 24.990234 9.9902344 A 1.0001 1.0001 0 0 0 24.292969 11.707031L26.585938 14L21 14 z","0 0 30 30").build());
+                    exportButton.addEventListener('click', () => {
+                        let blob = new Blob([JSON.stringify({
+                            ownerId: owner.id,
+                            playlists: Object.fromEntries(Array.from(playlists.entries()).map(([K,V]) => [K, V.snapshot_id])),
+                            tracks: Object.fromEntries(songs),
+                            playlistTracks: Object.fromEntries(Array.from(playlistSongs.entries()).map(([K,V]) => [K, Array.from(V)])),
+                        })],{type: "application/json"});
+
+                        let dlElem = document.createElement('a');
+                        dlElem.href = window.URL.createObjectURL(blob);
+                        dlElem.target = '_blank';
+                        dlElem.download = 'export.libsearch.spotitools.json';
+                        dlElem.click();
+                        dlElem.remove();
+                    });
+
+                    const filterForm = document.createElement('form');
+                    const filterInput = document.createElement('input');
+                    filterForm.append(filterInput);
+
+                    const tracklist = DomBuilder.ContainerDiv().addClasses('tracklist');
+                    function createTracklistItem (track) {
+
+                        const trackImg = document.createElement('img');
+                        trackImg.src = track.album?.images?.[0]?.url;
+                        trackImg.loading = 'lazy';
+                        trackImg.draggable = false;
+
+                        const trackInfo = DomBuilder.ContainerDiv().addClasses('info').append(
+                            DomBuilder.ContainerDiv().addClasses('title').setInnerText(track.name),
+                            DomBuilder.ContainerDiv().addClasses('artists').append(track.explicit ? DomBuilder.SVGIcon("M24,4H6C4.895,4,4,4.895,4,6v18c0,1.105,0.895,2,2,2h18c1.105,0,2-0.895,2-2V6C26,4.895,25.105,4,24,4z M20,10h-8v4h5v2h-5 v4h8v2h-9c-0.552,0-1-0.448-1-1V9c0-0.552,0.448-1,1-1h9V10z", "0 0 30 30") : undefined,...track.artists.map(v => {
+                                const artistDom = document.createElement('a');
+                                artistDom.href = v.external_urls.spotify;
+                                artistDom.target = '_blank';
+                                artistDom.innerText = v.name;
+                                artistDom.dataset["spotifyArtistid"] = v.id;
+                                artistDom.draggable = true;
+                                return artistDom;
+                            })),
+                        );
+
+                        const externalLink = document.createElement('a');
+                        externalLink.href = track.external_urls.spotify;
+                        externalLink.target = '_blank';
+                        externalLink.classList.add('action','external');
+                        externalLink.draggable = false;
+                        externalLink.append(DomBuilder.SVGIcon("M25.980469 2.9902344 A 1.0001 1.0001 0 0 0 25.869141 3L20 3 A 1.0001 1.0001 0 1 0 20 5L23.585938 5L13.292969 15.292969 A 1.0001 1.0001 0 1 0 14.707031 16.707031L25 6.4140625L25 10 A 1.0001 1.0001 0 1 0 27 10L27 4.1269531 A 1.0001 1.0001 0 0 0 25.980469 2.9902344 z M 6 7C4.9069372 7 4 7.9069372 4 9L4 24C4 25.093063 4.9069372 26 6 26L21 26C22.093063 26 23 25.093063 23 24L23 14L23 11.421875L21 13.421875L21 16L21 24L6 24L6 9L14 9L16 9L16.578125 9L18.578125 7L16 7L14 7L6 7 z", "0 0 30 30").build());
+
+                        const showOrigin = document.createElement('button');
+                        showOrigin.classList.add('action','origin');
+                        showOrigin.draggable = false;
+                        showOrigin.append(DomBuilder.SVGIcon("M24,4H6C4.895,4,4,4.895,4,6v18c0,1.105,0.895,2,2,2h18c1.105,0,2-0.895,2-2V6C26,4.895,25.105,4,24,4z M9,16 c-0.552,0-1-0.448-1-1c0-0.552,0.448-1,1-1s1,0.448,1,1C10,15.552,9.552,16,9,16z M21,16h-8c-0.552,0-1-0.448-1-1 c0-0.552,0.448-1,1-1h8c0.552,0,1,0.448,1,1C22,15.552,21.552,16,21,16z M9,10c-0.552,0-1-0.448-1-1c0-0.552,0.448-1,1-1 s1,0.448,1,1C10,9.552,9.552,10,9,10z M21,10h-8c-0.552,0-1-0.448-1-1c0-0.552,0.448-1,1-1h8c0.552,0,1,0.448,1,1 C22,9.552,21.552,10,21,10z M9,22c-0.552,0-1-0.448-1-1c0-0.552,0.448-1,1-1s1,0.448,1,1C10,21.552,9.552,22,9,22z M21,22h-8 c-0.552,0-1-0.448-1-1c0-0.552,0.448-1,1-1h8c0.552,0,1,0.448,1,1C22,21.552,21.552,22,21,22z", "0 0 30 30").build());
+
+                        const trackHead = DomBuilder.ContainerDiv().addClasses('trackhead').append(
+                            DomBuilder.ContainerDiv().addClasses('cover').append(trackImg),
+                            trackInfo,
+                            showOrigin,
+                            externalLink
+                        );
+
+                        const trackDom = DomBuilder.ContainerDiv().addClasses('track').append(trackHead).build();
+                        trackDom.draggable = true;
+                        trackDom.dataset["spotifyTrackid"] = track.id;
+                        return trackDom;
+                    }
+
+                    const trckl = tracklist.build();
+                    trckl.addEventListener('dragstart', (e) => {
+                        if (e.target instanceof HTMLElement) {
+                            if (e.target.dataset['spotifyTrackid']) {
+                                const trackId = e.target.dataset['spotifyTrackid'];
+                                e.dataTransfer.setData('text/plain',`https://open.spotify.com/track/${trackId}`);
+                                e.dataTransfer.setData('text/uri-list',`https://open.spotify.com/track/${trackId}`);
+                                e.dataTransfer.setData('text/x-spotify-tracks',`spotify:track:${trackId}`);
+                                e.dataTransfer.setData('text/x-spotify-section',`0`);
+                                e.dataTransfer.setDragImage(e.target, 0, e.target.clientHeight / 2);
+                                return;
+                            }
+                            if (e.target.dataset['spotifyArtistid']) {
+                                const artistId = e.target.dataset['spotifyArtistid'];
+                                e.dataTransfer.setData('text/plain',`https://open.spotify.com/artist/${artistId}`);
+                                e.dataTransfer.setData('text/uri-list',`https://open.spotify.com/artist/${artistId}`);
+                                e.dataTransfer.setData('text/x-spotify-artists',`spotify:artist:${artistId}`);
+                                e.dataTransfer.setData('text/x-spotify-section',`0`);
+                                e.dataTransfer.setDragImage(e.target, 0, e.target.clientHeight / 2);
+                                return;
+                            }
+                            if (e.target.dataset['spotifyPlaylistid']) {
+                                const playlistId = e.target.dataset['spotifyPlaylistid'];
+                                e.dataTransfer.setData('text/plain',`https://open.spotify.com/playlist/${playlistId}`);
+                                e.dataTransfer.setData('text/uri-list',`https://open.spotify.com/playlist/${playlistId}`);
+                                e.dataTransfer.setData('text/x-spotify-playlists',`spotify:playlist:${playlistId}`);
+                                e.dataTransfer.setData('text/x-spotify-section',`0`);
+                                e.dataTransfer.setDragImage(e.target, 0, e.target.clientHeight / 2);
+                                return;
+                            }
+                            e.preventDefault();
+                        }
+                    });
+                    trckl.addEventListener('dragover', (e) => {
+                        e.preventDefault();
+
+                    });
+                    trckl.addEventListener('dragend', (e) => {
+                        e.preventDefault();
+
+                    });
+                    trckl.addEventListener('dblclick', (e) => {
+                        e.preventDefault();
+                        for (/** @type {HTMLElement} */ let t = e.target; t !== null && t !== undefined; t = t.parentElement) {
+                            if (t.dataset['spotifyTrackid']) {
+                                spotify.ApiFetch('/me/player/play', {method: "PUT", body: {uris: [`spotify:track:${t.dataset['spotifyTrackid']}`]}});
+                                break;
+                            }
+                        }
+                    });
+                    trckl.addEventListener('click', (e) => {
+                        if (e.target.classList.contains('origin')) {
+                            for (/** @type {HTMLElement} */ let t = e.target; t !== null && t !== undefined; t = t.parentElement) {
+                                if (t.classList.contains('track') && t.dataset['spotifyTrackid']) {
+                                    const subnode = t.querySelector(".trackorigin");
+                                    if (subnode === null || subnode === undefined) {
+                                        const trackInPlaylists = new Set();
+                                        for (let [plId, pl] of playlistSongs) {
+                                            if (pl.has(t.dataset['spotifyTrackid'])) trackInPlaylists.add(plId);
+                                        }
+                                        t.append(DomBuilder.ContainerDiv().addClasses('trackorigin').append(
+                                            ...Array.from(trackInPlaylists.values()).map(plId => {
+                                                const pl = plId === "saved" ? {images: [{url: 'https://t.scdn.co/images/3099b3803ad9496896c43f22fe9be8c4.png'}], name: "Liked Songs", external_urls: {spotify: 'https://open.spotify.com/collection/tracks'}} : playlists.get(plId);
+                                                const playlistImg = document.createElement('img');
+                                                playlistImg.src = pl.images?.[0]?.url;
+                                                playlistImg.loading = 'lazy';
+                                                playlistImg.draggable = false;
+
+                                                const playlistInfo = DomBuilder.ContainerDiv().addClasses('info').append(
+                                                    DomBuilder.ContainerDiv().addClasses('name').setInnerText(pl.name),
+                                                );
+
+                                                const externalLink = document.createElement('a');
+                                                externalLink.href = pl.external_urls.spotify;
+                                                externalLink.target = '_blank';
+                                                externalLink.classList.add('action','external');
+                                                externalLink.draggable = false;
+                                                externalLink.append(DomBuilder.SVGIcon("M25.980469 2.9902344 A 1.0001 1.0001 0 0 0 25.869141 3L20 3 A 1.0001 1.0001 0 1 0 20 5L23.585938 5L13.292969 15.292969 A 1.0001 1.0001 0 1 0 14.707031 16.707031L25 6.4140625L25 10 A 1.0001 1.0001 0 1 0 27 10L27 4.1269531 A 1.0001 1.0001 0 0 0 25.980469 2.9902344 z M 6 7C4.9069372 7 4 7.9069372 4 9L4 24C4 25.093063 4.9069372 26 6 26L21 26C22.093063 26 23 25.093063 23 24L23 14L23 11.421875L21 13.421875L21 16L21 24L6 24L6 9L14 9L16 9L16.578125 9L18.578125 7L16 7L14 7L6 7 z", "0 0 30 30").build());
+
+                                                const playlistHead = DomBuilder.ContainerDiv().addClasses('playlisthead').append(
+                                                    DomBuilder.ContainerDiv().addClasses('cover').append(playlistImg),
+                                                    playlistInfo,
+                                                    externalLink
+                                                );
+
+                                                const playlistDom = DomBuilder.ContainerDiv().addClasses('playlist').append(playlistHead).build();
+                                                playlistDom.draggable = true;
+                                                if (plId === 'saved') playlistDom.dataset["spotifyCollectionid"] = 'tracks';
+                                                else playlistDom.dataset["spotifyPlaylistid"] = plId;
+                                                return playlistDom;
+                                            })
+                                        ).build());
+                                    }
+                                    t.toggleAttribute('originVisible');
+                                    break;
+                                }
+                            }
+                            return;
+                        }
+
+                    });
+
+                    filterForm.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        filterResults.clear();
+                        trckl.replaceChildren();
+                        /** @type {Set<string>} */
+                        const queries = new Set();
+                        /** @type {Set<{negate: boolean, type: string, value: string}>} */
+                        const parsedQueries = new Set();
+                        {
+                            let currentQuery = "";
+                            let insideString = false;
+                            let escapingChar = false;
+                            for (let char of filterInput.value.split('')) {
+                                if (char === "") continue;
+                                if (escapingChar) {
+                                    currentQuery += char;
+                                    escapingChar = false;
+                                    continue;
+                                }
+                                if (char === "\\") {
+                                    escapingChar = true;
+                                    continue;
+                                }
+                                if (char === "\"") {
+                                    if (insideString) {
+                                        insideString = false;
+                                        queries.add(currentQuery);
+                                        currentQuery = "";
+                                        continue;
+                                    }
+                                    if (currentQuery !== "") {
+                                        queries.add(currentQuery);
+                                        currentQuery = "";
+                                    }
+                                    insideString = true;
+                                    continue;
+                                }
+                                if (char === " ") {
+                                    if (!insideString) {
+                                        if (currentQuery !== "") {
+                                            queries.add(currentQuery);
+                                            currentQuery = "";
+                                        }
+                                        continue;
+                                    }
+                                }
+                                currentQuery += char;
+                            }
+                            if (currentQuery !== "") {
+                                queries.add(currentQuery);
+                                currentQuery = "";
+                            }
+                            for (let query of queries) {
+                                const _q = {};
+                                parsedQueries.add(_q);
+                                _q.negate = query.startsWith('!') && ((query = query.substring(1)) || true);
+                                if (query.startsWith('spotify:')) {
+                                    const qtype = query.substring(8);
+                                    if (qtype.startsWith('artist:')) {
+                                        const qval = qtype.substring(7);
+                                        _q.type = 'artist';
+                                        _q.value = qval;
+                                    }
+                                    if (qtype.startsWith('track:')) {
+                                        const qval = qtype.substring(6);
+                                        _q.type = 'track';
+                                        _q.value = qval;
+                                    }
+                                    if (qtype.startsWith('playlist:')) {
+                                        const qval = qtype.substring(9);
+                                        _q.type = 'playlist';
+                                        _q.value = qval;
+                                    }
+                                    continue;
+                                }
+                                _q.type = 'search';
+                                _q.value = query;
+                            }
+                        }
+                        for (let [songId, song] of songs.entries()) {
+                            let result = true;
+                            for (let query of parsedQueries) {
+                                let _result = true;
+                                if (query.type === 'artist') _result = song.artists.some(v => v.id === query.value);
+                                if (query.type === 'track') _result = song.id === query.value;
+                                if (query.type === 'playlist') _result = !!(playlistSongs.get(query.value)?.has(song.id));
+                                if (query.type === 'search') _result = song.name.toLowerCase().includes(query.value.toLowerCase()) || song.artists.some(v => v.name.toLowerCase().includes(query.value.toLowerCase())) || song.album?.name.toLowerCase().includes(query.value.toLowerCase());
+                                if (query.negate) _result = !_result;
+                                if (!_result) result = false;
+                                if (!result) break;
+                            }
+                            if (result) filterResults.add(song);
+                        }
+                        trckl.replaceChildren(...Array.from(filterResults.values()).slice(0, 200).map(t => createTracklistItem(t)));
+                    });
+
+                    contentDom.replaceChildren(DomBuilder.ContainerDiv().addClasses('tracklist-container').append(
+                        DomBuilder.ContainerDiv().addClasses('header').append(
+                            DomBuilder.ContainerDiv().addClasses('top').append(DomBuilder.ContainerDiv().addClasses('info').setInnerText(`${playlists.size} playlists and ${songs.size} tracks loaded`),exportButton),
+                            DomBuilder.ContainerDiv().addClasses('filter').append(filterForm)
+                        ),
+                        tracklist
+                    ).build());
+                };
+
+                document.getElementById('libsearch-fetch')?.addEventListener('click', fetchLibrary);
+                document.getElementById('libsearch-fetch-container')?.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                });
+                document.getElementById('libsearch-fetch-container')?.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files.item(0);
+                    if (file) {
+                        try {
+                            const saved = JSON.parse(await file.text());
+                            if (saved !== null) {
+                                if (owner.id === saved.ownerId) {
+                                    oldData = saved;
+                                }
+                            }
+                            fetchLibrary();
+                        } catch (ex) {
+
+                        }
+                    }
+                });
+
+
+            }
+            if (document.readyState === "loading") window.addEventListener('load', loadLib);
+            else loadLib();
+        })();
+    </script>
+</head>
+<body>
+<div class="app">
+    <div class="app-menuwrap app-wrapper">
+        <div class="app-menubar" id="app-menubar">
+            <div id="app-menubar-content">
+                <div class="app-menubar-logo" id="app-menubar-logo">
+                    <a href="/" target="_self">
+                        <span style="font-size: 2em; font-weight: bold;">Tools for Spotify</span>
+                    </a>
+                </div>
+                <div class="app-menubar-top">
+                    <a id="app-nav-github" class="app-navigation-entry" href="https://github.com/doriannaujokat/spotitools" target="_blank">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30">
+                            <path d="M15,3C8.373,3,3,8.373,3,15c0,5.623,3.872,10.328,9.092,11.63C12.036,26.468,12,26.28,12,26.047v-2.051 c-0.487,0-1.303,0-1.508,0c-0.821,0-1.551-0.353-1.905-1.009c-0.393-0.729-0.461-1.844-1.435-2.526 c-0.289-0.227-0.069-0.486,0.264-0.451c0.615,0.174,1.125,0.596,1.605,1.222c0.478,0.627,0.703,0.769,1.596,0.769 c0.433,0,1.081-0.025,1.691-0.121c0.328-0.833,0.895-1.6,1.588-1.962c-3.996-0.411-5.903-2.399-5.903-5.098 c0-1.162,0.495-2.286,1.336-3.233C9.053,10.647,8.706,8.73,9.435,8c1.798,0,2.885,1.166,3.146,1.481C13.477,9.174,14.461,9,15.495,9 c1.036,0,2.024,0.174,2.922,0.483C18.675,9.17,19.763,8,21.565,8c0.732,0.731,0.381,2.656,0.102,3.594 c0.836,0.945,1.328,2.066,1.328,3.226c0,2.697-1.904,4.684-5.894,5.097C18.199,20.49,19,22.1,19,23.313v2.734 c0,0.104-0.023,0.179-0.035,0.268C23.641,24.676,27,20.236,27,15C27,8.373,21.627,3,15,3z" />
+                        </svg>
+                        <div class="label">View source code</div>
+                    </a>
+                </div>
+                <div class="app-navigation" id="app-navigation">
+                    <a id="app-nav-libsearch" class="app-navigation-entry" href="/libsearch.html" target="_self">
+                        <div class="label">Library Search</div>
+                    </a>
+                </div>
+            </div>
+            <div id="app-menubar-resize"></div>
+        </div>
+        <div class="content">
+            <div class="app-headerwrap app-wrapper">
+                <div class="app-header" id="app-header">
+                    <button id="app-menubar-collapse">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30">
+                            <path d="M7,15c0-0.256,0.098-0.512,0.293-0.707l10-10c0.286-0.286,0.716-0.372,1.09-0.217C18.757,4.23,19,4.596,19,5v20 c0,0.404-0.243,0.77-0.617,0.924c-0.374,0.155-0.804,0.069-1.09-0.217l-10-10C7.098,15.512,7,15.256,7,15z" />
+                        </svg>
+                    </button>
+                    <div>Library Search</div>
+                    <div class="space"></div>
+                    <button class="account" id="account">
+                        <img id="account-image">
+                        <div id="account-name"></div>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30">
+                            <path d="M15,23c-0.256,0-0.512-0.098-0.707-0.293l-10-10c-0.286-0.286-0.372-0.716-0.217-1.09C4.23,11.243,4.596,11,5,11h20 c0.404,0,0.77,0.243,0.924,0.617c0.155,0.374,0.069,0.804-0.217,1.09l-10,10C15.512,22.902,15.256,23,15,23z" />
+                        </svg>
+                    </button>
+                </div>
+                <div class="content" id="content">
+                    <div class="center" id="libsearch-fetch-container" style="flex-direction: column;">
+                        <button class="button" id="libsearch-fetch">Load library</button>
+                        <div>or drag an export here</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>
